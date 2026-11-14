@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FreeClip – clip videos with auto captions</title>
+<style>
+  :root{--bg:#0f1115;--card:#181b22;--fg:#e8eaf0;--mut:#9aa3b2;--acc:#6ea8ff;--bd:#2a2f3a;--ok:#4cd68a;--err:#ff6b6b}
+  @media (prefers-color-scheme: light){:root{--bg:#f5f6f8;--card:#fff;--fg:#1a1d24;--mut:#5b6472;--acc:#1f6feb;--bd:#dfe3ea}}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--fg)}
+  main{max-width:900px;margin:0 auto;padding:24px 16px 60px}
+  h1{margin:0 0 4px;font-size:26px} .sub{color:var(--mut);margin:0 0 20px}
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;margin-bottom:16px}
+  .drop{border:2px dashed var(--bd);border-radius:12px;padding:28px;text-align:center;cursor:pointer}
+  .drop:hover{border-color:var(--acc)}
+  .stage{position:relative;background:#000;border-radius:10px;overflow:hidden}
+  video{width:100%;max-height:480px;display:block;background:#000}
+  #liveCap{position:absolute;left:8%;right:8%;bottom:12%;text-align:center;color:#fff;font-size:18px;text-shadow:0 0 4px #000,0 0 4px #000;pointer-events:none}
+  .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px}
+  label{font-size:13px;color:var(--mut)}
+  input[type=text],select{background:var(--bg);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:8px 10px;font-size:14px}
+  input[type=text]{width:110px}
+  button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:9px 14px;font-size:14px;cursor:pointer}
+  button.sec{background:transparent;color:var(--fg);border:1px solid var(--bd)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .bar{height:8px;background:var(--bd);border-radius:6px;overflow:hidden;margin-top:10px}
+  .bar>div{height:100%;width:0;background:var(--acc);transition:width .2s}
+  #status{font-size:13px;color:var(--mut);margin-top:8px;min-height:18px}
+  .err{color:var(--err)} .ok{color:var(--ok)}
+  #capList{max-height:200px;overflow:auto;font-size:13px;line-height:1.5;margin-top:10px}
+  #capList div{padding:2px 0;border-bottom:1px solid var(--bd)}
+  small{color:var(--mut)}
+  a.dl{color:var(--acc)}
+</style>
+</head>
+<body>
+<main>
+  <h1>🎬 FreeClip</h1>
+  <p class="sub">Free video clipper with auto captions. Runs 100% in your browser — your video never leaves your device.</p>
+
+  <div class="card">
+    <div class="drop" id="drop">
+      <strong>Choose a video</strong> or drop it here<br>
+      <small>Up to 7 hours · MP4, MOV, MKV, WebM · 1080p supported</small>
+    </div>
+    <input type="file" id="file" accept="video/*,.mkv,.mov" hidden>
+    <div id="info" style="margin-top:10px;font-size:14px"></div>
+  </div>
+
+  <div class="card" id="editor" hidden>
+    <div class="stage"><video id="v" controls playsinline></video><div id="liveCap"></div></div>
+
+    <div class="row">
+      <button class="sec" id="setStart">Set start ▶ here</button>
+      <label>Start <input type="text" id="start" value="0:00:00"></label>
+      <button class="sec" id="setEnd">Set end ■ here</button>
+      <label>End <input type="text" id="end" value="0:00:30"></label>
+      <button class="sec" id="previewBtn">Preview clip</button>
+      <small id="durLabel"></small>
+    </div>
+
+    <div class="row">
+      <label>Quality
+        <select id="quality">
+          <option value="copy">Original (fast, no re-encode)</option>
+          <option value="1080">1080p (re-encode)</option>
+          <option value="720">720p (re-encode)</option>
+          <option value="480">480p (re-encode)</option>
+        </select>
+      </label>
+      <label>Caption model
+        <select id="model">
+          <option value="Xenova/whisper-tiny">Tiny (fastest)</option>
+          <option value="Xenova/whisper-base">Base (more accurate)</option>
+          <option value="Xenova/whisper-small">Small (best, slow)</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="row">
+      <button id="clipBtn">✂️ Export clip</button>
+      <button id="capBtn" class="sec">💬 Generate auto captions</button>
+      <a id="dlClip" class="dl" hidden>Download clip</a>
+      <a id="dlSrt" class="dl" hidden>Download .srt</a>
+      <a id="dlVtt" class="dl" hidden>Download .vtt</a>
+    </div>
+
+    <div class="bar"><div id="prog"></div></div>
+    <div id="status"></div>
+    <div id="capList"></div>
+  </div>
+
+  <p><small>Tip: “Original” quality cuts at the nearest keyframe and is very fast, even for huge files. Re-encoding runs in your browser, so keep clips short.</small></p>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+<script type="module">
+const MAX_SECONDS = 7 * 60 * 60; // 7 hour limit
+const $ = id => document.getElementById(id);
+const v = $('v'), statusEl = $('status'), prog = $('prog');
+let file = null, duration = 0, ffmpeg = null, ffReady = false, captions = [], objUrl = null;
+
+const setStatus = (t, cls='') => { statusEl.className = cls; statusEl.textContent = t; };
+const setProg = p => prog.style.width = Math.max(0, Math.min(100, p)) + '%';
+
+const fmt = s => { s = Math.max(0, s); const h = Math.floor(s/3600), m = Math.floor(s%3600/60), x = s%60; return `${h}:${String(m).padStart(2,'0')}:${x.toFixed(x%1?1:0).padStart(2,'0')}`; };
+const parse = str => { const p = String(str).trim().split(':').map(Number); if (p.some(isNaN)) return NaN; return p.reduce((a,b)=>a*60+b,0); };
+const ts = (s, comma) => { const h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=Math.floor(s%60), ms=Math.floor((s%1)*1000); const p=n=>String(n).padStart(2,'0'); return `${p(h)}:${p(m)}:${p(x)}${comma?',':'.'}${String(ms).padStart(3,'0')}`; };
+
+// ---------- file picking ----------
+$('drop').onclick = () => $('file').click();
+$('drop').ondragover = e => e.preventDefault();
+$('drop').ondrop = e => { e.preventDefault(); if (e.dataTransfer.files[0]) load(e.dataTransfer.files[0]); };
+$('file').onchange = e => e.target.files[0] && load(e.target.files[0]);
+
+function load(f) {
+  if (objUrl) URL.revokeObjectURL(objUrl);
+  objUrl = URL.createObjectURL(f);
+  v.src = objUrl;
+  v.onloadedmetadata = () => {
+    if (v.duration > MAX_SECONDS) {
+      $('info').innerHTML = `<span class="err">This video is ${fmt(v.duration)} long. The limit is 7 hours.</span>`;
+      $('editor').hidden = true; file = null; return;
+    }
+    file = f; duration = v.duration; captions = [];
+    $('info').textContent = `${f.name} · ${(f.size/1e9).toFixed(2)} GB · ${fmt(duration)} · ${v.videoWidth}×${v.videoHeight}`;
+    $('editor').hidden = false;
+    $('start').value = '0:00:00';
+    $('end').value = fmt(Math.min(30, duration));
+    updateDur(); ['dlClip','dlSrt','dlVtt'].forEach(i => $(i).hidden = true); $('capList').innerHTML = '';
+    setStatus('');
+  };
+  v.onerror = () => { $('info').innerHTML = '<span class="err">Your browser can’t play this format. Try MP4 (H.264) or WebM.</span>'; $('editor').hidden = true; };
+}
+
+function range() {
+  const s = parse($('start').value), e = parse($('end').value);
+  if (isNaN(s) || isNaN(e) || e <= s) throw new Error('Enter a valid start and end (end must be after start).');
+  if (s >= duration) throw new Error('Start is past the end of the video.');
+  return [s, Math.min(e, duration)];
+}
+function updateDur() { try { const [s,e] = range(); $('durLabel').textContent = `Clip length: ${fmt(e-s)}`; } catch { $('durLabel').textContent = ''; } }
+$('start').oninput = $('end').oninput = updateDur;
+$('setStart').onclick = () => { $('start').value = fmt(v.currentTime); updateDur(); };
+$('setEnd').onclick = () => { $('end').value = fmt(v.currentTime); updateDur(); };
+$('previewBtn').onclick = () => { try { const [s,e] = range(); v.currentTime = s; v.play(); const stop = () => { if (v.currentTime >= e) { v.pause(); v.removeEventListener('timeupdate', stop); } }; v.addEventListener('timeupdate', stop); } catch(err){ setStatus(err.message,'err'); } };
+
+// live caption overlay
+v.addEventListener('timeupdate', () => {
+  if (!captions.length) return;
+  let s; try { [s] = range(); } catch { return; }
+  const t = v.currentTime - s;
+  const c = captions.find(c => t >= c.start && t <= c.end);
+  $('liveCap').textContent = c ? c.text : '';
+});
+
+// ---------- ffmpeg ----------
+async function getFFmpeg() {
+  if (ffReady) return ffmpeg;
+  setStatus('Loading video engine (first time only, ~30 MB)…');
+  const { FFmpeg } = FFmpegWASM, { toBlobURL } = FFmpegUtil;
+  ffmpeg = new FFmpeg();
+  ffmpeg.on('progress', ({ progress }) => { if (progress >= 0 && progress <= 1) setProg(progress * 100); });
+  const base = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
+  await ffmpeg.load({
+    coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'),
+    wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
+    classWorkerURL: await toBlobURL('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/814.ffmpeg.js', 'text/javascript'),
+  });
+  ffReady = true; return ffmpeg;
+}
+
+// Mount the file lazily (WORKERFS) so multi-GB / 7-hour files are NOT copied into memory.
+let mountedName = null;
+async function mountFile(ff) {
+  if (mountedName === file.name + file.size) return '/in/' + file.name;
+  try { await ff.unmount('/in'); } catch {}
+  try { await ff.createDir('/in'); } catch {}
+  await ff.mount('WORKERFS', { files: [file] }, '/in');
+  mountedName = file.name + file.size;
+  return '/in/' + file.name;
+}
+
+// ---------- export clip ----------
+$('clipBtn').onclick = async () => {
+  let s, e; try { [s, e] = range(); } catch (err) { return setStatus(err.message, 'err'); }
+  lock(true); setProg(0);
+  try {
+    const ff = await getFFmpeg(); const input = await mountFile(ff);
+    const q = $('quality').value, out = 'clip.mp4';
+    const args = ['-ss', String(s), '-i', input, '-t', String(e - s)];
+    if (q === 'copy') args.push('-c', 'copy', '-avoid_negative_ts', 'make_zero');
+    else args.push('-vf', `scale=-2:'min(${q},ih)'`, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k');
+    args.push('-movflags', '+faststart', '-y', out);
+    setStatus(q === 'copy' ? 'Cutting clip…' : 'Re-encoding clip (this can take a while)…');
+    const code = await ff.exec(args);
+    if (code !== 0) throw new Error('Export failed. Try “Original” quality or a shorter clip.');
+    const data = await ff.readFile(out); await ff.deleteFile(out);
+    const url = URL.createObjectURL(new Blob([data.buffer], { type: 'video/mp4' }));
+    const a = $('dlClip'); a.href = url; a.download = `clip_${fmt(s).replace(/:/g,'-')}.mp4`; a.textContent = `Download clip (${(data.length/1e6).toFixed(1)} MB)`; a.hidden = false;
+    setProg(100); setStatus('Clip ready ✔', 'ok');
+  } catch (err) { setStatus(err.message || String(err), 'err'); }
+  lock(false);
+};
+
+// ---------- auto captions (Whisper in the browser) ----------
+let asr = null, asrModel = null;
+$('capBtn').onclick = async () => {
+  let s, e; try { [s, e] = range(); } catch (err) { return setStatus(err.message, 'err'); }
+  if (e - s > 30 * 60) return setStatus('Captions work on clips up to 30 minutes. Shorten the clip range.', 'err');
+  lock(true); setProg(0);
+  try {
+    const ff = await getFFmpeg(); const input = await mountFile(ff);
+    setStatus('Extracting audio…');
+    const code = await ff.exec(['-ss', String(s), '-i', input, '-t', String(e - s), '-vn', '-ac', '1', '-ar', '16000', '-f', 'f32le', '-y', 'a.raw']);
+    if (code !== 0) throw new Error('Could not read audio from this video.');
+    const raw = await ff.readFile('a.raw'); await ff.deleteFile('a.raw');
+    const audio = new Float32Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
+
+    const modelId = $('model').value;
+    if (!asr || asrModel !== modelId) {
+      setStatus('Downloading caption model (first time only)…');
+      const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2');
+      const device = navigator.gpu ? 'webgpu' : 'wasm';
+      asr = await pipeline('automatic-speech-recognition', modelId, {
+        device, dtype: device === 'webgpu' ? 'fp32' : 'q8',
+        progress_callback: p => { if (p.status === 'progress') setProg(p.progress); }
+      });
+      asrModel = modelId;
+    }
+    setStatus('Transcribing… (runs on your device)'); setProg(0);
+    const res = await asr(audio, { return_timestamps: true, chunk_length_s: 30, stride_length_s: 5 });
+    captions = (res.chunks || []).map(c => ({ start: c.timestamp[0] ?? 0, end: c.timestamp[1] ?? (c.timestamp[0] + 2), text: c.text.trim() })).filter(c => c.text);
+    if (!captions.length) throw new Error('No speech detected in this range.');
+    $('capList').innerHTML = captions.map(c => `<div><small>${fmt(c.start)}</small> ${c.text.replace(/</g,'&lt;')}</div>`).join('');
+    const srt = captions.map((c,i) => `${i+1}\n${ts(c.start,true)} --> ${ts(c.end,true)}\n${c.text}\n`).join('\n');
+    const vtt = 'WEBVTT\n\n' + captions.map(c => `${ts(c.start)} --> ${ts(c.end)}\n${c.text}\n`).join('\n');
+    const link = (id, txt, name, type) => { const a = $(id); a.href = URL.createObjectURL(new Blob([txt], { type })); a.download = name; a.hidden = false; };
+    link('dlSrt', srt, 'captions.srt', 'text/plain'); link('dlVtt', vtt, 'captions.vtt', 'text/vtt');
+    setProg(100); setStatus(`Captions ready ✔ (${captions.length} lines). Press play on the clip range to see them live.`, 'ok');
+  } catch (err) { setStatus(err.message || String(err), 'err'); }
+  lock(false);
+};
+
+function lock(b) { ['clipBtn','capBtn'].forEach(i => $(i).disabled = b); }
+</script>
+</body>
+</html>
