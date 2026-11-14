@@ -46,12 +46,28 @@
     </div>
     <input type="file" id="file" accept="video/*,.mkv,.mov" hidden>
     <div class="row">
-      <input type="text" id="urlIn" placeholder="…ya direct video link paste karo (https://…/video.mp4)" style="flex:1;min-width:220px;width:auto">
+      <input type="text" id="urlIn" placeholder="YouTube link ya direct video link paste karo" style="flex:1;min-width:220px;width:auto">
       <button id="urlBtn">Load link</button>
     </div>
-    <small>Link direct video file ka hona chahiye (.mp4/.webm) aur us server pe CORS allowed ho. YouTube/Instagram links yahan kaam nahi karte.</small>
+    <small>YouTube link → clip mode (shareable clip link banta hai). Direct .mp4/.webm link → poora clip/caption/export (server pe CORS allowed hona chahiye).</small>
     <div class="bar"><div id="uprog"></div></div>
     <div id="info" style="margin-top:10px;font-size:14px"></div>
+  </div>
+
+  <div class="card" id="ytCard" hidden>
+    <strong>YouTube clip mode</strong> <small>(download nahi hota — clip ka shareable link banta hai)</small>
+    <div class="stage" style="aspect-ratio:16/9;margin-top:10px"><div id="ytPlayer" style="width:100%;height:100%"></div></div>
+    <div class="row">
+      <button class="sec" id="ytSetStart">Set start ▶ here</button>
+      <label>Start <input type="text" id="ytStart" value="0:00:00"></label>
+      <button class="sec" id="ytSetEnd">Set end ■ here</button>
+      <label>End <input type="text" id="ytEnd" value="0:00:30"></label>
+      <button class="sec" id="ytPreview">Preview clip</button>
+    </div>
+    <div class="row"><label><input type="checkbox" id="ytCc" checked> Captions ON (YouTube ke apne auto captions, agar video mein hon)</label></div>
+    <div class="row"><button id="ytMake">🔗 Make clip link</button></div>
+    <div class="row"><input type="text" id="ytOut" readonly style="flex:1;min-width:220px;width:auto"><button class="sec" id="ytCopy">Copy</button></div>
+    <div id="ytStatus" style="font-size:13px;margin-top:8px"></div>
   </div>
 
   <div class="card" id="editor" hidden>
@@ -125,8 +141,10 @@ $('file').onchange = e => e.target.files[0] && load(e.target.files[0]);
 $('urlBtn').onclick = async () => {
   const url = $('urlIn').value.trim();
   if (!/^https?:\/\//i.test(url)) { $('info').innerHTML = '<span class="err">Valid http(s) link paste karo.</span>'; return; }
-  if (/(youtube\.com|youtu\.be|instagram\.com|tiktok\.com|facebook\.com)/i.test(url)) {
-    $('info').innerHTML = '<span class="err">Is type ke links (YouTube/Instagram etc.) direct download nahi ho sakte. Direct .mp4/.webm link do.</span>'; return;
+  const yid = ytParse(url);
+  if (yid) { $('info').textContent = 'YouTube video mil gaya — niche clip mode mein khul raha hai.'; openYouTube(yid); return; }
+  if (/(instagram\.com|tiktok\.com|facebook\.com)/i.test(url)) {
+    $('info').innerHTML = '<span class="err">Is type ke links direct download nahi ho sakte. YouTube link ya direct .mp4/.webm link do.</span>'; return;
   }
   const up = $('uprog'); up.style.width = '0'; $('urlBtn').disabled = true;
   try {
@@ -153,7 +171,63 @@ $('urlBtn').onclick = async () => {
   $('urlBtn').disabled = false;
 };
 
+// ---------- YouTube clip-link mode ----------
+let yt = null, ytId = null, ytTimer = null;
+function ytParse(u) {
+  try {
+    const x = new URL(u); const h = x.hostname.replace(/^www\.|^m\./, '');
+    if (h === 'youtu.be') return x.pathname.slice(1).split('/')[0] || null;
+    if (h.endsWith('youtube.com')) {
+      if (x.searchParams.get('v')) return x.searchParams.get('v');
+      const m = x.pathname.match(/^\/(shorts|live|embed)\/([\w-]{6,})/); if (m) return m[2];
+    }
+  } catch {}
+  return null;
+}
+function ytApi() {
+  return new Promise(res => {
+    if (window.YT && YT.Player) return res();
+    window.onYouTubeIframeAPIReady = res;
+    const t = document.createElement('script'); t.src = 'https://www.youtube.com/iframe_api'; document.head.appendChild(t);
+  });
+}
+async function openYouTube(id) {
+  ytId = id; $('ytCard').hidden = false; $('editor').hidden = true; $('ytOut').value = ''; $('ytStatus').textContent = '';
+  await ytApi();
+  if (yt) { yt.loadVideoById(id); return; }
+  yt = new YT.Player('ytPlayer', { width: '100%', height: '100%', videoId: id, playerVars: { rel: 0, playsinline: 1 } });
+}
+function ytRange() {
+  const s = Math.floor(parse($('ytStart').value)), e = Math.ceil(parse($('ytEnd').value));
+  if (isNaN(s) || isNaN(e) || e <= s) throw new Error('Valid start aur end daalo (end start se bada hona chahiye).');
+  return [s, e];
+}
+const ytMsg = (t, cls = '') => { $('ytStatus').className = cls; $('ytStatus').textContent = t; };
+$('ytSetStart').onclick = () => { if (yt) $('ytStart').value = fmt(Math.floor(yt.getCurrentTime())); };
+$('ytSetEnd').onclick = () => { if (yt) $('ytEnd').value = fmt(Math.ceil(yt.getCurrentTime())); };
+$('ytPreview').onclick = () => {
+  try {
+    const [s, e] = ytRange(); yt.seekTo(s, true); yt.playVideo(); clearInterval(ytTimer);
+    ytTimer = setInterval(() => { if (yt.getCurrentTime() >= e) { yt.pauseVideo(); clearInterval(ytTimer); } }, 250);
+  } catch (err) { ytMsg(err.message, 'err'); }
+};
+$('ytMake').onclick = () => {
+  try {
+    const [s, e] = ytRange();
+    const q = new URLSearchParams({ start: s, end: e, rel: 0, autoplay: 1 });
+    if ($('ytCc').checked) q.set('cc_load_policy', 1);
+    $('ytOut').value = `https://www.youtube.com/embed/${ytId}?${q}`;
+    ytMsg('Clip link ready ✔ — ye link sirf chuna hua hissa chalayega.', 'ok');
+  } catch (err) { ytMsg(err.message, 'err'); }
+};
+$('ytCopy').onclick = async () => {
+  if (!$('ytOut').value) return ytMsg('Pehle "Make clip link" dabao.', 'err');
+  try { await navigator.clipboard.writeText($('ytOut').value); ytMsg('Copied ✔', 'ok'); } catch { $('ytOut').select(); ytMsg('Link select ho gaya, ab copy kar lo.'); }
+};
+
+// ---------- local video loading ----------
 function load(f) {
+  $('ytCard').hidden = true;
   if (objUrl) URL.revokeObjectURL(objUrl);
   objUrl = URL.createObjectURL(f);
   v.src = objUrl;
