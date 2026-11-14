@@ -45,6 +45,12 @@
       <small>Up to 7 hours · MP4, MOV, MKV, WebM · 1080p supported</small>
     </div>
     <input type="file" id="file" accept="video/*,.mkv,.mov" hidden>
+    <div class="row">
+      <input type="text" id="urlIn" placeholder="…ya direct video link paste karo (https://…/video.mp4)" style="flex:1;min-width:220px;width:auto">
+      <button id="urlBtn">Load link</button>
+    </div>
+    <small>Link direct video file ka hona chahiye (.mp4/.webm) aur us server pe CORS allowed ho. YouTube/Instagram links yahan kaam nahi karte.</small>
+    <div class="bar"><div id="uprog"></div></div>
     <div id="info" style="margin-top:10px;font-size:14px"></div>
   </div>
 
@@ -114,6 +120,38 @@ $('drop').onclick = () => $('file').click();
 $('drop').ondragover = e => e.preventDefault();
 $('drop').ondrop = e => { e.preventDefault(); if (e.dataTransfer.files[0]) load(e.dataTransfer.files[0]); };
 $('file').onchange = e => e.target.files[0] && load(e.target.files[0]);
+
+// ---------- load from pasted link ----------
+$('urlBtn').onclick = async () => {
+  const url = $('urlIn').value.trim();
+  if (!/^https?:\/\//i.test(url)) { $('info').innerHTML = '<span class="err">Valid http(s) link paste karo.</span>'; return; }
+  if (/(youtube\.com|youtu\.be|instagram\.com|tiktok\.com|facebook\.com)/i.test(url)) {
+    $('info').innerHTML = '<span class="err">Is type ke links (YouTube/Instagram etc.) direct download nahi ho sakte. Direct .mp4/.webm link do.</span>'; return;
+  }
+  const up = $('uprog'); up.style.width = '0'; $('urlBtn').disabled = true;
+  try {
+    $('info').textContent = 'Link se video la raha hoon…';
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('Server ne error diya (' + res.status + ').');
+    const total = +res.headers.get('content-length') || 0;
+    const reader = res.body.getReader(), parts = []; let got = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value); got += value.length;
+      if (total) { up.style.width = (got / total * 100) + '%'; $('info').textContent = `Loading… ${(got/1e6).toFixed(0)} / ${(total/1e6).toFixed(0)} MB`; }
+      else $('info').textContent = `Loading… ${(got/1e6).toFixed(0)} MB`;
+    }
+    const type = res.headers.get('content-type') || 'video/mp4';
+    let name = decodeURIComponent((new URL(url).pathname.split('/').pop()) || 'video.mp4');
+    if (!/\.[a-z0-9]{2,4}$/i.test(name)) name += '.mp4';
+    up.style.width = '100%';
+    load(new File(parts, name, { type }));
+  } catch (err) {
+    $('info').innerHTML = '<span class="err">Link load nahi hua: ' + (err.message || err) + ' (Shayad server CORS allow nahi karta.)</span>';
+  }
+  $('urlBtn').disabled = false;
+};
 
 function load(f) {
   if (objUrl) URL.revokeObjectURL(objUrl);
